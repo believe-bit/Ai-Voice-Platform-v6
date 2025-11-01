@@ -30,6 +30,7 @@ from passlib.hash import bcrypt
 import threading
 import hashlib
 from socketio import Client
+import socket
 
 # ==================== 全局配置 ====================
 STUDENT_IPS_FILE = Path(__file__).with_name('User') / 'student_ips.txt'
@@ -268,6 +269,15 @@ def require_auth(role=None):
         return decorated_function
     return decorator
 
+def get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return "127.0.0.1"
 
 # ====== 读取 speed_test.py stdout 并推送到 WebSocket ======
 def _asr_reader():
@@ -1976,7 +1986,7 @@ sio = Client(reconnection=True, reconnection_attempts=5, reconnection_delay=1)
 def on_connect():
     print(f'[学生端] 已连接主服务器: http://{args.server}')
     sio.emit('register_student', {
-        'ip': '192.168.1.124',   # 建议改为本机实际 IP
+        'ip': get_local_ip(),   # 建议改为本机实际 IP
         'port': args.port
     })
 
