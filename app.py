@@ -38,7 +38,6 @@ app = Flask(__name__)
 CORS(app)
 # CORS(app, resources={r"/api/*": {"origins": "*"}})
 # socketio = SocketIO(app, cors_allowed_origins="http://192.168.1.124:8082",logger=True)
-sio_server = SocketIO(app, cors_allowed_origins="*", logger=True)   # 服务端实例
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "models", "ASR_train_models")
@@ -1935,35 +1934,82 @@ def receive_guide():
         logging.error(f"下发失败 {e_id}: {e}")
         return jsonify({'error': '保存失败'}), 500
 
+# === 接收下发项目接口 ===
 @app.route('/receive_project', methods=['POST'])
 def receive_project():
+    global current_username
     data = request.get_json()
     project_id = data.get('project_id')
+
     if not project_id:
         return jsonify({'error': '缺少 project_id'}), 400
 
+    if not current_username:
+        return jsonify({'error': '学生端未登录，无用户名'}), 400
+
     try:
-        save_dir = Path('/data/huangtianle/Ai-Voice-Platform-student/User/student') / f"{project_id}_temp"
+        # 关键：保存到用户名目录
+        base_dir = Path('/data/huangtianle/Ai-Voice-Platform-student/User')
+        save_dir = base_dir / current_username / f"{project_id}"
         save_dir.mkdir(parents=True, exist_ok=True)
-        (save_dir / 'project.json').write_text(json.dumps({'project_id': project_id}, ensure_ascii=False), encoding='utf-8')
-        print(f"项目 {project_id} 已接收并保存到 {save_dir}")
+        
+        (save_dir / 'project.json').write_text(
+            json.dumps({'project_id': project_id, 'username': current_username}, ensure_ascii=False),
+            encoding='utf-8'
+        )
+        
+        print(f"[学生端] 项目 {project_id} 已下发给用户 {current_username}，保存至 {save_dir}")
         return jsonify({'message': '接收成功'}), 200
     except Exception as e:
-        print(f"保存项目失败: {e}")
+        print(f"[学生端] 保存失败: {e}")
         return jsonify({'error': str(e)}), 500
 
-sio = socketio.Client()
-@sio.event
-def connect():
-    print(f"学生端已连接主服务器: {args.server}")
+
+
+# =============  1. 创建客户端实例  =============
+sio = socketio.Client(reconnection=True)
+
+# =============  2. 先注册所有事件（必须在 connect 之前）  =============
+@sio.on('connect')
+def on_connect():
+    print(f'[学生端] 已连接主服务器: http://{args.server}')
     sio.emit('register_student', {
         'ip': '192.168.1.124',
         'port': args.port
     })
 
+@sio.on('disconnect')
+def on_disconnect():
+    print('[学生端] 与主服务器断开连接')
+
+@sio.on('connect_error')
+def on_connect_error(data):
+    print(f'[学生端] 连接主服务器失败: {data}')
+
+@sio.on('recycle_project')
+def on_recycle_project(data):
+    project_id = data.get('project_id')
+    if not project_id:
+        print("[回收实验] 缺少 project_id")
+        return
+    try:
+        base_dir   = Path('/data/huangtianle/Ai-Voice-Platform-student/User')
+        project_dir = base_dir / current_username / project_id
+        if project_dir.exists() and project_dir.is_dir():
+            shutil.rmtree(project_dir)
+            print(f"[回收实验] 已删除项目目录: {project_dir}")
+        else:
+            print(f"[回收实验] 项目目录不存在: {project_dir}")
+    except Exception as e:
+        print(f"[回收实验] 删除失败: {e}")
+
+@sio.on('*')
+def catch_all(event, data):
+    print(f'[学生端] 收到事件 {event} 数据 {data}')
 
 
 
+current_username = None
 
 # 启动时自动初始化数据库
 # def init_db_on_startup():
@@ -1977,57 +2023,28 @@ def connect():
 # -----------------------------------------------------------
 #  优雅方案：eventlet 并发跑 Flask + WebSocket 客户端
 # -----------------------------------------------------------
+# -----------------------------------------------------------
+#  学生端入口：只保留 WebSocket 客户端
+# -----------------------------------------------------------
 if __name__ == '__main__':
-    import eventlet
-    eventlet.monkey_patch()          # 必须在任何网络库导入前执行
-
     import argparse
-    import socketio as socketio_client   # 学生端 WebSocket 客户端
-    import threading
+    import time
 
-    # ---------- 1. 命令行参数 ----------
     parser = argparse.ArgumentParser()
-    parser.add_argument('--port', type=int, default=5001, help='学生端本地端口')
+    parser.add_argument('--port', type=int, default=5001,
+                        help='学生端本地端口（占位，无实际用途）')
     parser.add_argument('--server', type=str, default='127.0.0.1:5000',
                         help='主服务器地址，格式 ip:port')
+    parser.add_argument('--username', type=str, required=True,
+                        help='当前登录的学生用户名')
     args = parser.parse_args()
+    current_username = args.username
 
-    # ---------- 2. 启动 Flask-SocketIO 服务（非阻塞） ----------
-    # 注意：这里用 socketio.run 启动，内部自动走 eventlet
-    def run_flask():
-        sio_server.run(app,
-                       host='0.0.0.0',
-                       port=args.port,
-                       debug=False,
-                       use_reloader=False)
-
-    flask_thread = threading.Thread(target=run_flask, daemon=False)
-    flask_thread.start()
-
-    # ---------- 3. 创建并启动 WebSocket 客户端 ----------
-    sio = socketio_client.Client(reconnection=True)
-
-    @sio.event
-    def connect():
-        print(f'[学生端] 已连接主服务器: http://{args.server}')
-        sio.emit('register_student',
-                 {'ip': '192.168.1.124',   # 改成你本机实际 IP
-                  'port': args.port})
-
-    @sio.event
-    def disconnect():
-        print('[学生端] 与主服务器断开连接')
-
-    @sio.event
-    def connect_error(data):
-        print(f'[学生端] 连接主服务器失败: {data}')
-
-    # 等待 Flask 完全启动后再连服务器（简单等 1 秒）
-    eventlet.sleep(1)
+    time.sleep(1)
     try:
         sio.connect(f'http://{args.server}')
+        print(f'[学生端] 已连接主服务器: http://{args.server}')
     except Exception as e:
         print(f'[学生端] 首次连接失败: {e}，稍后自动重试...')
 
-    # ---------- 4. 保持主线程存活 ----------
-    sio.wait()          # 阻塞主线程，直到 WebSocket 断开
+    sio.wait()
